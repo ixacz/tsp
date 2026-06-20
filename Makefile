@@ -31,4 +31,7 @@ $(PDF_OUTPUT_FILE): $(PDF_INPUT_FILE)
 	@echo "Compiling LaTex file..."
 	@xelatex $(PDF_INPUT_FILE)
 
+push-pdf-file: $(PDF_OUTPUT_FILE)
+	@echo "Pushing pdf file output to the phone"
+	@adb push travelling-salesman-probem.pdf /sdcard/Documents/pdfs/tsp
 
