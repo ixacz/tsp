@@ -8,6 +8,8 @@
 \usepackage{amsmath}
 \usepackage{tikz}
 
+\usetikzlibrary{positioning}
+
 \usepackage{authblk}
 
 
@@ -99,14 +101,14 @@
 تنقسم الى نوعين رئيسيين بناءاً على اتجاه الطرق:
 
 \begin{enumerate}
-	\item \textbf {مشكله البائع الجوال المتناظره \en{Symmetric TSP}}:
+	\item \textbf {مشكله البائع المتجول المتناظره \en{Symmetric TSP}}:
 هنا تكون الطرق ذات اتجاهين ومتساويه في التكلفه. اي ان المسافه من المدينه \en{A} الى المدينه \en{B}, تساوي المسافه من \en{B} الى \en{A}. اي ($c_{ij} = c_{ji}$). ويحسب عدد الوصلات بالعلاقه:\\
 
 	{\LARGE $$
 	Number of Edges = \frac{n(n - 1)}{2} \quad ; \quad n \in N^*
 	$$}\\
 
-	\item \textbf{ مشكله البائع الجوال غير المتناظره \en{Asymmetric TSP}}:
+	\item \textbf{ مشكله البائع المتجول غير المتناظره \en{Asymmetric TSP}}:
 وهنا تكون الطرق موجهة وتختلف تكلفاها حسب الاتجاه ($c_{ij} \not = c_{ji}$). ويحسب عدد الوصلات بالعلاقه: \\
 
 	{\LARGE $$
@@ -251,6 +253,44 @@ $$}\\
 
 \subsection{الخطوه الاولى: تهيئه البيانات}
 في المرحله الاولى نعد بيانات المدن ونقوم بحساب الوصلات بينها ونخزنها في \en{Arrays} تسهل التعامل معها.
+
+\subsubsection{حساب المسافات ونخزينها}
+يتم حساب المسافه بين كل عقدتين (مدينتين) عبر معادله المسافه المباشره الاقليديه:\\
+
+{\LARGE
+$$
+d_{ij} = \sqrt{(x_i - x_j)^2 + (y_i - y_j)^2}
+$$}\\
+
+وتخزن القيمه الناتجة داخل الوصله, حيث يوجد \en{`struct Edge`} يخزن معرفي العقدتين الطرفيتين الخاص بهما, والى جانبه قيمه المسافه الـ "جغرافيه", او اي واحده تكلفه مراد التعامل معها.
+
+\subsubsection{طريقه تمثيل بيانات العقد في الرسم البياني}
+اشهر الطرق في توضيح العلاقه بين العقد لحل مشكله البائع المتجول هي استخدام مايسمى بـ \en{Weighted Graph}, حيث انه بنيه بيانات مميزه, ويتكون من عقد ووصلات, كل عقده لها رقم, وكل وصله تمثل الوزن بين كل عقدتين:\\
+
+\begin{figure}[h]
+	\centering
+	\begin{tikzpicture}[
+	node/.style={circle, draw, minimum size=8mm, thick, fill=gray!10},
+	edge/.style={-, thick},
+	node distance=3cm
+	]
+
+		\node[node] (1) {$t_1$};
+		\node[node] (2) [above right=of 1] {$t_2$};
+		\node[node] (3) [below right=of 1] {$t_3$};
+		\node[node] (4) [below right=of 2] {$t_4$};
+
+		\path[edge] (1) edge node[above left] {12} (2);
+		\path[edge] (1) edge node[below left] {7} (3);
+		\path[edge] (2) edge node[above right] {5} (4);
+		\path[edge] (3) edge node[below right] {9} (4);
+
+		\path[edge] (2) edge node[above right, fill=white, inner sep=2pt] {3} (3);
+		\path[edge] (1) edge node[below left, fill=white, inner sep=2pt] {10} (4);
+
+	\end{tikzpicture}
+\end{figure}
+
 
 \subsection{الخطوه الثانيه: \en{The Held-Karp optimaization loop}}
 \subsubsection{القاعده الرياضيه: \en{Lagrangian Relaxation}}
