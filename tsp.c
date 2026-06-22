@@ -1,3 +1,13 @@
+/*
+ * tsp.c - Simple custom TSP Solver using LKH algoeithm, powered by
+ *  Lin-Kernighan heuristic search and Held-Karp relaxation.
+ *
+ *  Copyright (c) 2026 Osama Mohamed. All Rights Reserved.
+ *
+ *  This file is licensed under the MIT License, see LICENSE.
+ *
+ * */
+
 #include <stdio.h>
 #include <float.h>
 #include <string.h>
@@ -7,9 +17,9 @@
 #include <math.h>
 
 #define KROA100_OPTIMAL 21282.0
-#define PR1002_OPTIMAL 259045.0
 #define SY40_OPTIMAL 2414824 
 
+// Change for the input file.
 #define BEST_TOUR_SOLUTION SY40_OPTIMAL
 
 const char* CYRIAN_CITIES_40[] = {
