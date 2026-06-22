@@ -21,6 +21,8 @@ typedef struct {
     double penalized_cost;
 } Edge;
 
+#define MAX_CANDIDATES 5
+
 typedef struct {
     Node* nodes;
     int node_count;
@@ -33,6 +35,9 @@ typedef struct {
     Edge* edges;
     int edge_count;
     
+    int max_candidates;
+    int* candidates;
+    
     int* upper_bound_tour;
     double upper_bound;
     double epsilon;
@@ -41,6 +46,24 @@ typedef struct {
     double best_lower_bound;
 } GraphContext;
 
+void allocate_candidate_matrix(GraphContext* ctx) {
+    ctx->max_candidates = MAX_CANDIDATES;
+
+    size_t total_elements = (size_t) ctx->node_count * (size_t) MAX_CANDIDATES;
+
+    ctx->candidates = malloc(total_elements * sizeof(int));
+    if (!ctx->candidates) {
+        fprintf(stderr, "Error allocating candidates.");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < total_elements; i++) {
+        ctx->candidates[i] = -1;
+    }
+}
+
+#define GET_CANDIDATE(ctx, node, rank) ((ctx)->candidates[(node) * (ctx)->max_candidates + (rank)])
+
 void init_graph_ctx(GraphContext* ctx, int n) {
     ctx->edge_count = ctx->node_count * (ctx->node_count - 1) / 2;
     ctx->edges = malloc(ctx->edge_count * sizeof(Edge));
@@ -48,6 +71,8 @@ void init_graph_ctx(GraphContext* ctx, int n) {
     ctx->best_pis = (double*) calloc(n, sizeof(double));
     ctx->degrees = (int*) malloc(n * sizeof(double));
     ctx->upper_bound_tour = (int*) malloc(n * sizeof(int));
+    allocate_candidate_matrix(ctx);
+
 }
 
 void load_cities_from_file(GraphContext* ctx, const char* filepath) {
@@ -426,11 +451,9 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
                 ctx->best_lower_bound = ctx->curr_lower_bound;
                 save_best_pi_values(ctx);
                 improvement_found = true;
-                printf("Held-Karp improvement_found.\n");
             }
 
             double step_size = calculate_step_size(ctx);
-            printf("Held-Karp step_size = %lf\n", step_size);
             if (step_size == 0.0) {
                 status = HK_NATURAL_TOUR_FOUND;
                 save_best_pi_values(ctx);
@@ -442,11 +465,6 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
                 int nodeid = ctx->nodes[i].id;
                 double gradient = ctx->degrees[nodeid] - 2;
                 ctx->pis[i] += step_size * gradient;
-            }
-
-            for (int i = 0; i < ctx->node_count; i++) {
-                // printf("pi(%d) = %lf ", i, ctx->pis[i]);
-            
             }
         }
 
@@ -463,133 +481,289 @@ exit:
     return status;
 }
 
+// Reconstructs the 1-tree and returns the total penalized lower bound cost
+double reconstruct_optimal_1tree(GraphContext* ctx, Edge *output_edges) {
+    int n = ctx->node_count;
+    int edge_idx = 0;
+    double total_1tree_cost = 0.0;
 
-// typedef struct {
-//     int neighbors[NUM_CITIES];
-//     int costs[NUM_CITIES];
-//     int count;
-// } AdjacencyList;
-//
-// // Helper function to preform Depth-First Search (DFS) traversal across the 1-tree branches.
-// void find_max_path_edges(int current_node, int parent_node, double current_max, int root_node, AdjacencyList* adj, double** max_weight) {
-//     // Store the largest edge found on the path from "root_node" to "current_node".
-//     max_weight[root_node][current_node] = current_max;
-//
-//     // Traverse all structural neighbors in out 1-tree.
-//     for (int i = 0; i < adj[current_node].count; i++) {
-//         int neighbor = adj[current_node].neighbors[i];
-//         double edge_cost = adj[current_node].costs[i];
-//
-//         if (neighbor != parent_node) {
-//             double next_max = (edge_cost > current_max) ? edge_cost : current_max;
-//             find_max_path_edges(neighbor, current_node, next_max, root_node, adj, max_weight);
-//         }
-//     }
-// }
-//
-// double** compute_alpha_nearness(Node* cities, Edge* optimaized_one_tree, int num_cities, int num_edges) {
-//     AdjacencyList* adj = calloc(num_cities, sizeof(AdjacencyList));
-//
-//     for (int i = 0; i < num_cities; i++) {
-//         int u = optimaized_one_tree[i].from->id;
-//         int v = optimaized_one_tree[i].from->id;
-//         double cost = optimaized_one_tree[i].distance;
-//
-//         adj[u].neighbors[adj[u].count] = v;
-//         adj[u].costs[adj[u].count++] = cost;
-//
-//         adj[v].neighbors[adj[v].count] = u;
-//         adj[v].costs[adj[v].count++] = cost;
-//     }
-//
-//     // Allocate 2D max_weight matrix lookup table.
-//     double** max_weight = (double**) malloc(num_cities * sizeof(double*));
-//     for (int i = 0; i < num_cities; i++) {
-//         max_weight[i] = (double*) malloc(num_cities * sizeof(double));    
-//     }
-//
-//     // compute max edge on path for all city pairs by running DFS from every city.
-//     for (int i = 0; i < num_cities; i++) {
-//         find_max_path_edges(i, -1, 0.0, i, (AdjacencyList*) adj, max_weight);   
-//     }
-//
-//     // Allocate and populate our finall 2D Alpha matrix.
-//     double** alpha_matrix = (double**) malloc(num_cities * sizeof(double*));
-//     for (int i = 0; i < num_cities; i++) {
-//         alpha_matrix[i] = (double*) malloc(num_cities * sizeof(double));
-//     }
-//
-//     for (int i = 0; i < num_cities; i++) {
-//         for (int j = 0; j < num_cities; j++) {
-//             if (i == j) {
-//                 alpha_matrix[i][j] = 0.0;
-//                 continue;
-//             }
-//
-//             // get abse distance and add final node penalties (alpha-nearness values).
-//             double base_dist = calculate_distance(cities[i], cities[j]);
-//             double adjusted_cost = base_dist + cities[i].pi + cities[j].pi;
-//
-//             // Alpha = AdjustedCost - MaxEdgeOnPath
-//             alpha_matrix[i][j] = adjusted_cost - max_weight[i][j];
-//
-//             if (alpha_matrix[i][j] < 1e-6) alpha_matrix[i][j] = 0.0;
-//         }
-//     }
-//
-//     for (int i = 0; i < num_cities; i++) free(max_weight[i]);
-//     free(max_weight);
-//     free(adj);
-//
-//     return alpha_matrix;
-// }
-//
-// int compare_candidates(const void* a, const void* b) {
-//     Candidate* cand_a = (Candidate*) a;
-//     Candidate* cand_b = (Candidate*) b;
-//
-//     if (cand_a->alpha < cand_b->alpha) return -1;
-//     if (cand_a->alpha > cand_b->alpha) return 1;
-//
-//     // if alpha values are equal, prefer the physically shrter edge.
-//     if (cand_a->distance < cand_b->distance) return -1;
-//     if (cand_a->distance > cand_b->distance) return 1;
-//
-//     return 0;
-// }
-//
-// void build_candidate_sets(Node* cities, int num_cities, double** alpha_matrix, int max_candidates) {
-//     // temp array to hold all possible neighbors for sorting.
-//     Candidate* temp_pool = (Candidate*) malloc((num_cities - 1) * sizeof(Candidate));
-//
-//     for (int i = 0; i < num_cities; i++) {
-//         int pool_idx = 0;
-//
-//         for (int j = 0; j < num_cities; j++) {
-//             if (i == j) continue;
-//
-//             temp_pool[pool_idx].to_id = cities[j].id;
-//             temp_pool[pool_idx].alpha = alpha_matrix[i][j];
-//             temp_pool[pool_idx].distance = calculate_distance(cities[i], cities[j]);
-//             pool_idx++;
-//         }
-//
-//         qsort(temp_pool, num_cities - 1, sizeof(Candidate), compare_candidates);
-//
-//         int actual_keep_count = (num_cities - 1 < max_candidates) ? (num_cities - 1) : max_candidates;
-//
-//         cities[i].candidates = (Candidate*) malloc(actual_keep_count * sizeof(Candidate));
-//         cities[i].candidates_count = actual_keep_count;
-//
-//         for (int k = 0; k < actual_keep_count; k++) {
-//             cities[i].candidates[k] = temp_pool[k];
-//             // visualize_city_candidates(cities, num_cities, i);
-//         }
-//     }
-//
-//     free(temp_pool);
-//     printf("[Candidate Sets] Successfully generated top-%d candidates edges for all %d cities.\n", max_candidates, num_cities);
-// }
+    // Workspace arrays for Prim's Algorithm (O(N) space)
+    double* min_dist = malloc(n * sizeof(double));
+    int* parent = malloc(n * sizeof(int));
+    bool* in_mst = calloc(n, sizeof(bool));
+
+    // Initialize Prim's workspace starting from node 1 (skipping node 0)
+    for (int i = 1; i < n; i++) {
+        min_dist[i] = DBL_MAX;
+        parent[i] = -1;
+    }
+    min_dist[1] = 0.0; // Start building MST from node 1
+
+    // --- STEP 1: Prim's Algorithm on Nodes 1 to N-1 ---
+    for (int step = 1; step < n; step++) {
+        // Find the unvisited node with the minimum penalized distance
+        int u = -1;
+        double min_val = DBL_MAX;
+        for (int i = 1; i < n; i++) {
+            if (!in_mst[i] && min_dist[i] < min_val) {
+                min_val = min_dist[i];
+                u = i;
+            }
+        }
+
+        in_mst[u] = true;
+        total_1tree_cost += min_val;
+
+        // If it's not the starting node, record the MST edge
+        if (parent[u] != -1) {
+            output_edges[edge_idx].from = parent[u];
+            output_edges[edge_idx].to = u;
+            output_edges[edge_idx].penalized_cost = min_val;
+            edge_idx++;
+        }
+
+        // Update neighbors' configurations
+        for (int v = 1; v < n; v++) {
+            if (!in_mst[v]) {
+                // Penalized distance calculation: c_uv + pi[u] + pi[v]
+                double p_dist = calculate_euclidean_distance(ctx, u, v) + ctx->best_pis[u] + ctx->best_pis[v];
+                if (p_dist < min_dist[v]) {
+                    min_dist[v] = p_dist;
+                    parent[v] = u;
+                }
+            }
+        }
+    }
+
+    // --- STEP 2: Find the 2 Cheapest Penalized Edges from Node 0 ---
+    int best_v1 = -1, best_v2 = -1;
+    double min_e1 = DBL_MAX, min_e2 = DBL_MAX;
+
+    for (int v = 1; v < n; v++) {
+        double p_dist = calculate_euclidean_distance(ctx, 0, v) + ctx->best_pis[0] + ctx->best_pis[v];
+        
+        if (p_dist < min_e1) {
+            min_e2 = min_e1;
+            best_v2 = best_v1;
+            
+            min_e1 = p_dist;
+            best_v1 = v;
+        } else if (p_dist < min_e2) {
+            min_e2 = p_dist;
+            best_v2 = v;
+        }
+    }
+
+    // Add node 0's two chosen edges to the output structure
+    output_edges[edge_idx].from = 0;
+    output_edges[edge_idx].to = best_v1;
+    output_edges[edge_idx].penalized_cost = min_e1;
+    edge_idx++;
+
+    output_edges[edge_idx].from = 0;
+    output_edges[edge_idx].to = best_v2;
+    output_edges[edge_idx].penalized_cost = min_e2;
+    edge_idx++;
+
+    total_1tree_cost += (min_e1 + min_e2);
+
+    // Clean up temporary workspace
+    free(min_dist);
+    free(parent);
+    free(in_mst);
+
+    return total_1tree_cost;
+}
+
+typedef struct {
+    int target;
+    double penalized_cost;
+} TreeEdge;
+
+// Forword Star Representation.
+typedef struct {
+    TreeEdge* edges;    // Size: 2 * N (since edges are bidirectional).
+                        // Holds the actual paylod data for an edge index `e`.
+                        // Witch has the node it points to `target`, and
+                        // its penalized distance `penalized_cost`.
+
+    int* head;          // Size: N (points to the start of a node's edges).
+                        // Maps a node ID to in index in the `edges` array,
+                        // witch acts as an entery point to that node's list
+                        // of connections.
+
+    int* next;          // Size: 2 * N (linked list).
+                        // Handles the chaining, it tells the program where
+                        // to head once it finish with the current edge.
+
+    int edge_count;
+} TreeGraph;
+
+
+void add_tree_edge(TreeGraph* g, int u, int v, double penalized_cost) {
+    // 1- An edge slot is claimed at index `e = g->edge_count++`.
+    int e = g->edge_count++;
+
+    // 2- The edge at index `e` is loaded with the target node ID `v`,
+    //  and its penalized distance `penalized_cost`.
+    g->edges[e].target = v;
+
+    // 3- The new edge is hooked to the front of node `u`'s list,
+    //  `g->next[e] = g->head[u];`.
+    g->edges[e].penalized_cost = penalized_cost;
+
+    // 4- The new entery is updated to point to this new edge,
+    //  `g->head[u] = e`.
+    g->next[e] = g->head[u];
+    g->head[u] = e;
+}
+
+// The objective of this function is to start at a `root` node and find
+// c_max(foot, j) -- the heaviest penalized edge weight along the uniqe
+// path inside the tree form root to every other node.
+void bfs_max_edges(TreeGraph* g, int root, int n, double* c_max, bool* visited) {
+    // FIFO queue (First In First Out).
+    int* queue = malloc(n * sizeof(int));
+    // Tracks the fornt of the `queue`. where elements read/popped.
+    int head = 0;
+    // Tracks the back of the `queue`. where new elements appended.
+    int tail = 0;
+    
+    // Seed the `root` node as visited.
+    visited[root] = true;
+    // Initialize `root`'s cost to zero.
+    c_max[root] = 0.0;
+    // And push it into the back of the queue by storing it and advance the tail pointer.
+    queue[tail++] = root;
+    
+    // As long as head is longer the the tail, unexamined nodes are remaining.
+    while (head < tail) {
+        // Reads the next node from the queue and shifts the `head` pointer right.
+        int current_node = queue[head++];
+        // Fetches the heaviest edge cost excountered on the path all the way from `root` node
+        // to this `current_node`.
+        double current_max = c_max[current_node];
+        
+        // Step through the adjacency list:
+        // 1- It looks up `g->head[current_node]` to find the starting point where `current_node`'s
+        //  edges are starting in the global array.
+        // 2- it extracts the `neighbor` ID stored at that edge slot payload `g->edges[e].target`.
+        // 3- after processing, `e = g->next[e].target` jumps directly the next packed edge index
+        //  belonging to `current_node`.
+        for (int e = g->head[current_node]; e != -1; e = g->next[e]) {
+            int neighbor = g->edges[e].target;
+            
+            // Check if the current_node's neighbor is not visited.
+            if (!visited[neighbor]) {
+                // If not set it to true.
+                visited[neighbor] = true;
+                // Get its penalized_cost.
+                double edge_penalized_cost = g->edges[e].penalized_cost;
+                // Check if its penalized_cost is larger than we have seen till now, if so record it
+                // to the max cost encountered up to this point.
+                c_max[neighbor] = (edge_penalized_cost > current_max) ? edge_penalized_cost : current_max;
+                // Save the neighbor in the queue so it can be used to finds its neighbors.
+                queue[tail++] = neighbor;
+            }
+        }
+    }
+
+    free(queue);
+}
+
+typedef struct {
+    int node_id;
+    double alpha;
+} AlphaPair;
+
+// Comparison function for sorting alphas lowest to highest
+int compare_alphas(const void *a, const void *b) {
+    double alpha_a = ((AlphaPair*)a)->alpha;
+    double alpha_b = ((AlphaPair*)b)->alpha;
+    return (alpha_a > alpha_b) - (alpha_a < alpha_b);
+}
+
+void compute_all_candidate_sets(GraphContext* ctx, TreeGraph *g) {
+    int node_count = ctx->node_count;
+    int max_candidates = ctx->max_candidates;
+
+    // Temporary arrays allocated once, reused for every node loop
+    double* c_max = malloc(node_count * sizeof(double));
+    AlphaPair* pairs = malloc(node_count * sizeof(AlphaPair));
+    bool* visited = malloc(node_count * sizeof(bool));
+
+    for (int i = 0; i < node_count; i++) {
+        // Reset all tracking pools for every node pass.
+        for (int j = 0; j < node_count; j++) {
+            visited[j] = false;
+            c_max[j] = 0.0;
+        }
+
+        // Run BFS from node 'i' to find max path edges to all other nodes
+        bfs_max_edges(g, i, node_count, c_max, visited);
+
+        // Calculate alpha values for all possible neighbors
+        for (int j = 0; j < node_count; j++) {
+            pairs[j].node_id = j;
+            
+            if (i == j) {
+                pairs[j].alpha = DBL_MAX; // Can't connect a node to itself
+            } else {
+                // penalized_distance = original_rounded_dist + pi[i] + pi[j]
+                double p_dist = calculate_euclidean_distance(ctx, i, j) + ctx->pis[i] + ctx->pis[j];
+                
+                // alpha = penalized_distance - max_edge_on_path
+                double alpha_val = p_dist - c_max[j];
+                
+                // Clean up tiny floating point precision noise (e.g. -0.0000001 -> 0.0)
+                pairs[j].alpha = (alpha_val < 1e-6) ? 0.0 : alpha_val;
+            }
+        }
+
+        // Sort neighbors so the lowest alphas rise to the top
+        qsort(pairs, node_count, sizeof(AlphaPair), compare_alphas);
+
+        // Fill row 'i' of your flat candidate matrix with the top M node IDs
+        for (int k = 0; k < max_candidates; k++) {
+            ctx->candidates[i * max_candidates + k] = pairs[k].node_id;
+        }
+    }
+
+    // Clean up temporary workspace memory
+    free(c_max);
+    free(pairs);
+}
+
+void generate_alpha_candidates(GraphContext* ctx, Edge* reconstructed_edges) {
+    int n = ctx->node_count;
+
+    TreeGraph g;
+    g.edge_count = 0;
+    g.edges = malloc(2 * n * sizeof(TreeEdge));
+    g.next = malloc(2 * n * sizeof(int));
+    g.head = malloc(n * sizeof(int));
+    
+    // Initialize the head array to -1 (signifying empy liked lists).
+    for (int i = 0; i < n; i++) {
+        g.head[i] = -1;
+    }
+
+    for (int i = 0; i < n; i++) {
+        int u = reconstructed_edges[i].from;
+        int v = reconstructed_edges[i].to;
+        double weight = reconstructed_edges[i].penalized_cost;
+        
+        // Add bidirectional edges to the tree structure.
+        add_tree_edge(&g, u, v, weight);
+        add_tree_edge(&g, v, u, weight);
+    }
+
+    compute_all_candidate_sets(ctx, &g);
+
+    free(g.edges);
+    free(g.next);
+    free(g.head);
+}
 
 int main()
 {
@@ -601,28 +775,18 @@ int main()
     ctx.upper_bound = estimate_target_bound(&ctx);
 
     optimaize_held_karp_relaxation(&ctx);
-
     printf("UP = %lf, LB = %lf\n", ctx.upper_bound, ctx.best_lower_bound);
 
-    // HeldKarpOptions hko = {
-    //     .max_iterations = 2000,
-    //     .epsilon = 0.5,
-    //     .period = 20,
-    //     .target_bound = estimate_target_bound(c),  
-    //     .spacial_node = 0  
-    // }; 
-    //
-    // HeldKarpOneTree ot = optimaize_held_karp(c, e, hko);
-    // for (int i = 0; i < ot.one_tree.count; i++) {
-    //     Edge ce = ot.one_tree.edges[i];
-    //     printf("%4d: HeldKarpEdge(%d, %d, %lf, %lf)\n", i, ce.from->id, ce.to->id, ce.distance, ce.cost);
-    // }
+    allocate_candidate_matrix(&ctx);
+    
+    Edge* optimal_1_tree = malloc(ctx.node_count * sizeof(Edge));
 
-    // Edge* one_tree = optimaize_held_karp(cities, num_cities, num_edges, 0);
-    //
-    // double** alpha_matrix = compute_alpha_nearness(cities, one_tree, num_cities, num_edges);
-    //
-    // build_candidate_sets(cities, num_cities, alpha_matrix, MAX_CANDIDATES);
+    double penalized_lower_bound = reconstruct_optimal_1tree(&ctx, optimal_1_tree);
+    (void) penalized_lower_bound;
+
+    generate_alpha_candidates(&ctx, optimal_1_tree);
+
+    free(optimal_1_tree);
     
     return 0;
     
