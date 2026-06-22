@@ -74,7 +74,8 @@ void init_graph_ctx(GraphContext* ctx, int n) {
     ctx->degrees = (int*) malloc(n * sizeof(double));
     ctx->upper_bound_tour = (int*) malloc(n * sizeof(int));
     allocate_candidate_matrix(ctx);
-
+    ctx->tour = malloc(ctx->node_count * sizeof(int));
+    ctx->pos = malloc(ctx->node_count * sizeof(int));
 }
 
 void load_cities_from_file(GraphContext* ctx, const char* filepath) {
@@ -139,7 +140,8 @@ void load_cities_from_file(GraphContext* ctx, const char* filepath) {
         }
     }
     fclose(file);
-    printf("[Parser] Successfully loaded data file!\n");
+    printf("[Init] Successfully parced & loaded the data file. Nodes (N): %d, Edge Count: %d\n",
+            ctx->node_count, ctx->edge_count);
 }
 
 
@@ -384,6 +386,7 @@ double estimate_target_bound(GraphContext* ctx) {
     total_ub_cost += calculate_euclidean_distance(ctx, current_node, ctx->upper_bound_tour[0]);
     free(visited);
 
+    printf("[Init] Naive Nearest Neighbor Search tour cost (Initial Upper Bound): %lf\n", total_ub_cost);
     return total_ub_cost;
 }
 
@@ -436,6 +439,8 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
     for (int period = initial_period; 
          period > 0 && ctx->epsilon > MIN_EPSILON;
          period *= 0.5, ctx->epsilon *= 0.5) {
+        printf("[Held-Karp] Starting Period Phase. Scale Steps: %d, Epsilon (Step Size Modifier): %e\n",
+                period, ctx->epsilon);
         
         bool improvement_found = false;
 
@@ -450,6 +455,9 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
             
             // Evaluate if we found a new higher upper bound.
             if (ctx->curr_lower_bound > ctx->best_lower_bound) {
+                printf("    [Lower Bound Improvement Found] Period Step %d: Old Best LB = %lf -> New Best LB = %lf (Diff: %+lf)\n",
+                        step, ctx->best_lower_bound, ctx->curr_lower_bound, ctx->curr_lower_bound - ctx->best_lower_bound);
+
                 ctx->best_lower_bound = ctx->curr_lower_bound;
                 save_best_pi_values(ctx);
                 improvement_found = true;
@@ -457,6 +465,7 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
 
             double step_size = calculate_step_size(ctx);
             if (step_size == 0.0) {
+                printf("    [Step Size] Convergence Achieved! Natural valid tour discovered during subgradient walk.\n");
                 status = HK_NATURAL_TOUR_FOUND;
                 save_best_pi_values(ctx);
                 goto exit;
@@ -573,6 +582,9 @@ double reconstruct_optimal_1tree(GraphContext* ctx, Edge *output_edges) {
     free(min_dist);
     free(parent);
     free(in_mst);
+
+    printf("[1-Tree] Reconstruction complete using locked Pi multipliers. Penalized Cost: %lf\n",
+            total_1tree_cost);
 
     return total_1tree_cost;
 }
@@ -728,6 +740,11 @@ void compute_all_candidate_sets(GraphContext* ctx, TreeGraph *g) {
         // Fill row 'i' of your flat candidate matrix with the top M node IDs
         for (int k = 0; k < max_candidates; k++) {
             ctx->candidates[i * max_candidates + k] = pairs[k].node_id;
+        }
+
+        if ((i + 1) % 50 == 0 || (i + 1) == node_count) {
+            printf("[Candidates Generation] Computed alpha-sets for %d / %d nodes.\n", 
+                    i + 1, node_count);
         }
     }
 
@@ -1042,8 +1059,13 @@ bool lk_search_step(GraphContext* ctx, LKContext* lkctx) {
 
                 // Success Condition: Valid closure found.
                 if (cumulative_gain + step_gain + closure_gain > 1e-6) {
+                    lkctx->current_depth = depth + 1;
                     if (validate_tour_feasibility(ctx, lkctx, t_2i_plus_2)) {
                         lkctx->t[2 * depth + 2] = t_2i_plus_2;
+
+                        printf("    [LK Swap Executed] Anchor Node ID: %d, Swap Sequence Depth (k): %d, Realized Gain: %lf\n",
+                                lkctx->t[1], depth, (cumulative_gain + step_gain + closure_gain));
+
                         execute_variable_lk_swap(ctx, lkctx);
                         return true;
                     }
@@ -1097,6 +1119,8 @@ void run_lk_engine(GraphContext* ctx) {
     lkctx.edge_status_changed = calloc(ctx->node_count, sizeof(bool));
 
     while (improvement_found) {
+        // printf("[LK Engine] Entering optimaization epoch. Baseline Tour Cost: %lf\n",
+        //         curr)
         improvement_found = false;
 
         for (int n_idx = 0; n_idx < ctx->node_count; n_idx++) {
@@ -1130,6 +1154,9 @@ void run_lk_engine(GraphContext* ctx) {
 }
 
 void generate_nearest_neighbor_tour(GraphContext* ctx, int start_node) {
+    int hit_elite_count = 0;
+    int fallback_count = 0;
+
     // Allocate a flat bitmask tracking array for visited nodes
     bool *visited = calloc(ctx->node_count, sizeof(bool));
     if (!visited) {
@@ -1166,6 +1193,9 @@ void generate_nearest_neighbor_tour(GraphContext* ctx, int start_node) {
 
         // OPTIMIZATION PHASE B: Fallback scan if elite candidates are spent O(N).
         if (next_node == -1) {
+            // For tracking progress.
+            fallback_count++;
+
             for (int j = 0; j < ctx->node_count; j++) {
                 if (!visited[j]) {
                     double dist = calculate_euclidean_distance(ctx, current_node, j);
@@ -1175,7 +1205,7 @@ void generate_nearest_neighbor_tour(GraphContext* ctx, int start_node) {
                     }
                 }
             }
-        }
+        } else hit_elite_count++; // For tracking progress.
 
         // Commit the chosen node to the tour layout structures
         ctx->tour[i] = next_node;
@@ -1183,6 +1213,10 @@ void generate_nearest_neighbor_tour(GraphContext* ctx, int start_node) {
         visited[next_node] = true;
         
         current_node = next_node;
+
+        printf("[Initial Tour] Nearest Neighbor Initial Tour constructed.\n");
+        printf("    Alpha hits: %d, Global Scanning Fallbacks: %d\n",
+                hit_elite_count, fallback_count);
     }
 
     free(visited);
@@ -1213,7 +1247,20 @@ int main()
 
     run_lk_engine(&ctx);
 
-    free(optimal_1_tree);
+    double final_cost = 0.0;
+    for (int i = 0; i < ctx.node_count; i++) {
+        int from = ctx.tour[i];
+        int to = ctx.tour[(i + 1) % ctx.node_count];
+        final_cost += calculate_euclidean_distance(&ctx, from, to);
+    }
+
+    printf("-----------------------------------------------------\n");
+    printf("[Execution Summary]\n");
+    printf("    Held-Karp Lower Bound: %lf\n", ctx.best_lower_bound);
+    printf("    Final LK Optimaized Tour Cost: %lf\n", final_cost);
+    printf("    Optimality Gap Remaining: %lf%%\n", 
+            (final_cost - ctx.best_lower_bound) / ctx.best_lower_bound);
+    printf("-----------------------------------------------------\n");
     
     return 0;
     
