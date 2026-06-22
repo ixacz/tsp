@@ -6,7 +6,6 @@
 #include <time.h>
 #include <math.h>
 
-
 typedef struct {
     int id;
     int x;
@@ -44,6 +43,9 @@ typedef struct {
 
     double curr_lower_bound;
     double best_lower_bound;
+
+    int* tour;
+    int* pos;
 } GraphContext;
 
 void allocate_candidate_matrix(GraphContext* ctx) {
@@ -765,6 +767,427 @@ void generate_alpha_candidates(GraphContext* ctx, Edge* reconstructed_edges) {
     free(g.head);
 }
 
+#define MAX_LK_DEPTH 10
+
+typedef struct {
+    int t[2 * MAX_LK_DEPTH + 1];    // Array to store the node sequence.
+    int current_depth;              // Currenr k-opt depth.
+    bool* edge_status_changed;      // Track manipulated edges by a boolean flag.
+} LKContext;
+
+bool is_edge_disjoint(LKContext* lkctx, int u, int v, int current_k) {
+    for (int i = 1; i < current_k; i++) {
+        int b1 = lkctx->t[2 * i - 1];
+        int b2 = lkctx->t[2 * i];
+
+        if ((b1 == u && b2 == v) || (b1 == v && b2 == u)) {
+            return false;
+        }
+    }
+
+    for (int i = 1; i < current_k; i++) {
+        int a1 = lkctx->t[2 * i];
+        int a2 = lkctx->t[2 * i + 1];
+
+        if ((a1 == u && a2 == v) || (a1 == v && a2 == u)) {
+                return false;
+        }
+    }
+
+    return true;
+}
+
+typedef struct {
+    int k_idx;          // Position inside the candidate matrix row.
+    int direction;      // Current tour direction (0 = successor, 1 = predecessor)
+    double saved_gain;  // Cumulative gain before entering the tier.
+} LKLoopState;
+
+int get_tour_successor(GraphContext* ctx, int node) {
+    int current_idx = ctx->pos[node];
+    int next_idx = (current_idx + 1) % ctx->node_count;
+    return ctx->tour[next_idx];
+}
+
+int get_tour_predecessor(GraphContext* ctx, int node) {
+    int current_idx = ctx->pos[node];
+    int prev_idx = (current_idx - 1 + ctx->node_count) % ctx->node_count;
+    return ctx->tour[prev_idx];
+}
+
+typedef struct { int to_local; bool is_added; } VirtualEdge;
+typedef struct { int node; int pos; } SortNode;
+
+int compare_sort_nodes(const void *a, const void *b) {
+    return ((SortNode*)a)->pos - ((SortNode*)b)->pos;
+}
+
+bool is_broken_edge(LKContext *lkctx, int k_depth, int u, int v) {
+    for (int i = 1; i <= k_depth; i++) {
+        int b1 = lkctx->t[2*i - 1]; int b2 = lkctx->t[2*i];
+        if ((b1 == u && b2 == v) || (b1 == v && b2 == u)) return true;
+    }
+    return false;
+}
+
+int get_local_idx(SortNode *nodes, int num_nodes, int node_id) {
+    for (int i = 0; i < num_nodes; i++) {
+        if (nodes[i].node == node_id) return i;
+    }
+    return -1;
+}
+
+bool validate_tour_feasibility(GraphContext *ctx, LKContext *ws, int t_2k) {
+    int k_depth = ws->current_depth;
+    int num_nodes = 2 * k_depth;
+    ws->t[2 * k_depth] = t_2k; // Temporarily pin the closure target
+
+
+    SortNode nodes[20];
+    for (int i = 1; i <= num_nodes; i++) {
+        nodes[i-1].node = ws->t[i];
+        nodes[i-1].pos = ctx->pos[ws->t[i]];
+    }
+    qsort(nodes, num_nodes, sizeof(SortNode), compare_sort_nodes);
+
+
+    VirtualEdge v_graph[20][2];
+    int v_count[20] = {0};
+
+
+    // 1. Map Added Edges virtually
+    int l_t1 = get_local_idx(nodes, num_nodes, ws->t[1]);
+    int l_t2k = get_local_idx(nodes, num_nodes, ws->t[num_nodes]);
+    v_graph[l_t1][v_count[l_t1]++] = (VirtualEdge){l_t2k, true};
+    v_graph[l_t2k][v_count[l_t2k]++] = (VirtualEdge){l_t1, true};
+
+
+    for (int i = 1; i < k_depth; i++) {
+        int l_t2i = get_local_idx(nodes, num_nodes, ws->t[2*i]);
+        int l_t2i_p1 = get_local_idx(nodes, num_nodes, ws->t[2*i + 1]);
+        v_graph[l_t2i][v_count[l_t2i]++] = (VirtualEdge){l_t2i_p1, true};
+        v_graph[l_t2i_p1][v_count[l_t2i_p1]++] = (VirtualEdge){l_t2i, true};
+    }
+
+
+    // 2. Map Unbroken/Intact Original Tour Segments virtually
+    for (int i = 0; i < num_nodes; i++) {
+        int u = nodes[i].node;
+        int succ = get_tour_successor(ctx, u);
+        if (!is_broken_edge(ws, k_depth, u, succ)) {
+            int next_local = (i + 1) % num_nodes;
+            v_graph[i][v_count[i]++] = (VirtualEdge){next_local, false};
+            v_graph[next_local][v_count[next_local]++] = (VirtualEdge){i, false};
+        }
+    }
+
+
+    // 3. Trace the micro-graph to verify it forms a single cycle
+    bool visited_local[20] = {false};
+    int curr_local = 0, prev_local = -1, count_visited = 0;
+    do {
+        visited_local[curr_local] = true;
+        count_visited++;
+        int next_local = (v_graph[curr_local][0].to_local != prev_local) 
+                         ? v_graph[curr_local][0].to_local 
+                         : v_graph[curr_local][1].to_local;
+        prev_local = curr_local;
+        curr_local = next_local;
+    } while (curr_local != 0 && !visited_local[curr_local]);
+
+
+    return (count_visited == num_nodes && curr_local == 0);
+}
+
+
+void execute_variable_lk_swap(GraphContext* ctx, LKContext* lkctx) {
+    int k_depth = lkctx->current_depth;
+    int num_nodes = 2 * k_depth;
+
+    SortNode nodes[20];
+    for (int i = 1; i <= num_nodes; i++) {
+        nodes[i-1].node = lkctx->t[i];
+        nodes[i-1].pos = ctx->pos[lkctx->t[i]];
+    }
+
+    qsort(nodes, num_nodes, sizeof(SortNode), compare_sort_nodes);
+
+    VirtualEdge v_graph[20][2];
+    int v_count[20] = {0};
+
+    // Reconstruct the verified micro-graph
+    int l_t1 = get_local_idx(nodes, num_nodes, lkctx->t[1]);
+    int l_t2k = get_local_idx(nodes, num_nodes, lkctx->t[num_nodes]);
+    v_graph[l_t1][v_count[l_t1]++] = (VirtualEdge){l_t2k, true};
+    v_graph[l_t2k][v_count[l_t2k]++] = (VirtualEdge){l_t1, true};
+
+    for (int i = 1; i < k_depth; i++) {
+        int l_t2i = get_local_idx(nodes, num_nodes, lkctx->t[2*i]);
+        int l_t2i_p1 = get_local_idx(nodes, num_nodes, lkctx->t[2*i + 1]);
+        v_graph[l_t2i][v_count[l_t2i]++] = (VirtualEdge){l_t2i_p1, true};
+        v_graph[l_t2i_p1][v_count[l_t2i_p1]++] = (VirtualEdge){l_t2i, true};
+    }
+
+    for (int i = 0; i < num_nodes; i++) {
+        int u = nodes[i].node;
+        int succ = get_tour_successor(ctx, u);
+        if (!is_broken_edge(lkctx, k_depth, u, succ)) {
+            int next_local = (i + 1) % num_nodes;
+            v_graph[i][v_count[i]++] = (VirtualEdge){next_local, false};
+            v_graph[next_local][v_count[next_local]++] = (VirtualEdge){i, false};
+        }
+    }
+
+    // Allocate memory for the new tour configuration
+    int *new_tour = malloc(ctx->node_count * sizeof(int));
+    int filled = 0;
+    int curr_local = l_t1;
+    int curr_node = lkctx->t[1];
+    int prev_local = -1;
+
+    new_tour[filled++] = curr_node;
+
+    // Linearly stitch the tour segments back together
+    while (filled < ctx->node_count) {
+        int edge_idx = (v_graph[curr_local][0].to_local == prev_local) ? 1 : 0;
+        VirtualEdge edge = v_graph[curr_local][edge_idx];
+        int next_local = edge.to_local;
+
+        if (edge.is_added) {
+            curr_node = nodes[next_local].node;
+            if (filled < ctx->node_count) new_tour[filled++] = curr_node;
+        } else {
+            // Determine segment traversal direction
+            if (next_local == (curr_local + 1) % num_nodes) {
+                int walk = get_tour_successor(ctx, curr_node);
+                int target = nodes[next_local].node;
+                while (walk != target) {
+                    if (filled < ctx->node_count) new_tour[filled++] = walk;
+                    walk = get_tour_successor(ctx, walk);
+                }
+                if (filled < ctx->node_count) new_tour[filled++] = target;
+                curr_node = target;
+            } else {
+                int walk = get_tour_predecessor(ctx, curr_node);
+                int target = nodes[next_local].node;
+                while (walk != target) {
+                    if (filled < ctx->node_count) new_tour[filled++] = walk;
+                    walk = get_tour_predecessor(ctx, walk);
+                }
+                if (filled < ctx->node_count) new_tour[filled++] = target;
+                curr_node = target;
+            }
+        }
+        prev_local = curr_local;
+        curr_local = next_local;
+    }
+
+    // Commit changes back to Context and synchronize the pos inversion map
+    for (int i = 0; i < ctx->node_count; i++) {
+        ctx->tour[i] = new_tour[i];
+        ctx->pos[new_tour[i]] = i;
+    }
+
+    free(new_tour);
+}
+
+bool lk_search_step(GraphContext* ctx, LKContext* lkctx) {
+    int max_candidates = ctx->max_candidates;
+    
+    // Alocating the tracking state frames
+    LKLoopState loop_stack[MAX_LK_DEPTH];
+    
+    // Seed depth step with 1.
+    int depth = 1;
+    loop_stack[depth].k_idx = 0;
+    loop_stack[depth].direction = 0;
+    loop_stack[depth].saved_gain = 0;
+
+    while (depth > 0) {
+        int t_2i = lkctx->t[2 * depth];
+        double cumulative_gain = loop_stack[depth].saved_gain;
+        bool step_deepened = false;
+
+        for (; loop_stack[depth].k_idx < max_candidates; loop_stack[depth].k_idx++) {
+            int t_2i_plus_1 = GET_CANDIDATE(ctx, t_2i, loop_stack[depth].k_idx);
+
+            // Prevent tracking back along immediate links or bearking disjointness.
+            if (t_2i_plus_1 == lkctx->t[2 * depth - 1] || !is_edge_disjoint(lkctx, t_2i, t_2i_plus_1, depth)) {
+                continue;
+            }
+
+            double added_edge_cost = calculate_euclidean_distance(ctx, t_2i, t_2i_plus_1);
+            double current_beark_cost = calculate_euclidean_distance(ctx, lkctx->t[2 * depth - 1], t_2i);
+            double step_gain = current_beark_cost - added_edge_cost;
+
+            // Check Gain Criterion
+            if (cumulative_gain + step_gain <= 1e-6) {
+                continue;
+            }
+
+            lkctx->t[2 * depth + 1] = t_2i_plus_1;
+
+            // Core Evaluation Branch: Find or resume finding t_2i_plus_1
+            for (; loop_stack[depth].direction < 2; loop_stack[depth].direction++) {
+                int t_2i_plus_2 = (loop_stack[depth].direction == 0)
+                    ? get_tour_successor(ctx, t_2i_plus_1)
+                    : get_tour_predecessor(ctx, t_2i_plus_1);
+
+                if (!is_edge_disjoint(lkctx, t_2i_plus_1, t_2i_plus_2, depth)) {
+                    continue;
+                }
+
+                double closure_gain = calculate_euclidean_distance(ctx, t_2i_plus_1, t_2i_plus_2) -
+                                      calculate_euclidean_distance(ctx, t_2i_plus_2, lkctx->t[1]);
+
+                // Success Condition: Valid closure found.
+                if (cumulative_gain + step_gain + closure_gain > 1e-6) {
+                    if (validate_tour_feasibility(ctx, lkctx, t_2i_plus_2)) {
+                        lkctx->t[2 * depth + 2] = t_2i_plus_2;
+                        execute_variable_lk_swap(ctx, lkctx);
+                        return true;
+                    }
+                }
+
+                //Step Forword, check if we can deepen the search tier safely.
+                if (depth + 1 < MAX_LK_DEPTH) {
+                    lkctx->t[2 * depth + 2] = t_2i_plus_2;
+
+                    // Initialize the next execution frame.
+                    int next_depth = depth + 1;
+                    loop_stack[next_depth].k_idx = 0;
+                    loop_stack[next_depth].direction = 0;
+                    loop_stack[next_depth].saved_gain = cumulative_gain + step_gain;
+
+                    // Advenced state incerment to ensure that when we eventually
+                    // backtrack to this frame, we try the ALTERNATE choice next.
+                    loop_stack[depth].direction++;
+
+                    depth = next_depth;
+                    step_deepened = true;
+                    break;
+                }
+            }
+
+            if (step_deepened) break;
+            
+            // Reset the inner direction loop for the next candidate row change.
+            loop_stack[depth].direction = 0;
+        }
+
+        if (step_deepened) continue;
+        
+        // Backtrack Branch: if both loops are spent at this depth level, drop down
+        depth--;
+        if (depth > 0) {
+            // Check if the frame we dropped into had completed its direction options.
+            if (loop_stack[depth].direction >= 2) {
+                loop_stack[depth].direction = 0;
+                loop_stack[depth].k_idx++; // Push to next elite candidate target.
+            }
+        }
+    }
+
+    return false; // No profitable k-opt configurations found from this base root.
+}
+
+void run_lk_engine(GraphContext* ctx) {
+    bool improvement_found = true;
+    LKContext lkctx;
+    lkctx.edge_status_changed = calloc(ctx->node_count, sizeof(bool));
+
+    while (improvement_found) {
+        improvement_found = false;
+
+        for (int n_idx = 0; n_idx < ctx->node_count; n_idx++) {
+            // Set the base anchor t1 to the currentndoe in the tour layout.
+            lkctx.t[1] = ctx->tour[n_idx];
+            lkctx.current_depth = 1;
+
+            // Strategy A: Try successor first, Choose initial broken edge target t2.
+            lkctx.t[2] = get_tour_successor(ctx, lkctx.t[1]);
+            // Wipe the midification history clean before starting a new search tree.
+            memset(lkctx.edge_status_changed, 0, ctx->node_count * sizeof(bool));
+
+            if (lk_search_step(ctx, &lkctx)) {
+                improvement_found = true;
+                break; // Tour layout updated, restart outer scanning loop.
+            }
+
+            // Strategy B: Try bearking the backword edge, predecessor as t2 if successor yielded no improvements.
+            lkctx.t[2] = get_tour_predecessor(ctx, lkctx.t[1]);
+
+            memset(lkctx.edge_status_changed, 0, ctx->node_count * sizeof(bool));
+
+            if (lk_search_step(ctx, &lkctx)) {
+                improvement_found = true;
+                break;
+            }
+        }
+    }
+
+    free(lkctx.edge_status_changed);
+}
+
+void generate_nearest_neighbor_tour(GraphContext* ctx, int start_node) {
+    // Allocate a flat bitmask tracking array for visited nodes
+    bool *visited = calloc(ctx->node_count, sizeof(bool));
+    if (!visited) {
+        fprintf(stderr, "Error: Memory allocation failed for NNS tracking.\n");
+        return;
+    }
+
+    // Seed the first node of the tour
+    ctx->tour[0] = start_node;
+    ctx->pos[start_node] = 0;
+    visited[start_node] = true;
+
+    int current_node = start_node;
+    int m = ctx->max_candidates;
+
+    // Main construction loop: Find the next closest city for each position i
+    for (int i = 1; i < ctx->node_count; i++) {
+        int next_node = -1;
+        double min_dist = DBL_MAX;
+
+        // OPTIMIZATION PHASE A: Check the elite candidate matrix first O(1).
+        if (ctx->candidates != NULL) {
+            for (int k = 0; k < m; k++) {
+                int candidate = ctx->candidates[current_node * m + k];
+                if (!visited[candidate]) {
+                    double dist = calculate_euclidean_distance(ctx, current_node, candidate);
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        next_node = candidate;
+                    }
+                }
+            }
+        }
+
+        // OPTIMIZATION PHASE B: Fallback scan if elite candidates are spent O(N).
+        if (next_node == -1) {
+            for (int j = 0; j < ctx->node_count; j++) {
+                if (!visited[j]) {
+                    double dist = calculate_euclidean_distance(ctx, current_node, j);
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        next_node = j;
+                    }
+                }
+            }
+        }
+
+        // Commit the chosen node to the tour layout structures
+        ctx->tour[i] = next_node;
+        ctx->pos[next_node] = i; // Perfect dynamic alignment of our O(1) inversion map
+        visited[next_node] = true;
+        
+        current_node = next_node;
+    }
+
+    free(visited);
+}
+
 int main()
 {
     GraphContext ctx = {};
@@ -785,6 +1208,10 @@ int main()
     (void) penalized_lower_bound;
 
     generate_alpha_candidates(&ctx, optimal_1_tree);
+
+    generate_nearest_neighbor_tour(&ctx, 0);
+
+    run_lk_engine(&ctx);
 
     free(optimal_1_tree);
     
