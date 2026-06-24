@@ -19,8 +19,8 @@
 #define KROA100_OPTIMAL 21282.0
 #define SY40_OPTIMAL 2414824 
 
-// Change for the input file.
-#define BEST_TOUR_SOLUTION SY40_OPTIMAL
+// Change for the coresponding input file.
+#define BEST_TOUR_SOLUTION KROA100_OPTIMAL
 
 const char* CYRIAN_CITIES_40[] = {
     "", // Padding index 0 (since TSPLIB IDs start at 1)
@@ -108,15 +108,17 @@ void init_graph_ctx(GraphContext* ctx, int n) {
 
 // When printing your final optimized tour:
 void print_named_tour(GraphContext* ctx) {
-    printf("\nOptimized Tour Sequence:\n");
-    for (int i = 0; i < ctx->node_count; i++) {
-        int node_id = ctx->tour[i] + 1; // Map 0-indexed offset back to TSPLIB ID
-        printf(" %s (%d) -> ", CYRIAN_CITIES_40[node_id], node_id);
-        if ((i + 1) % 5 == 0) {
-            printf("\n");
+    if ((BEST_TOUR_SOLUTION == SY40_OPTIMAL)) {
+        printf("\nOptimized Tour Sequence:\n");
+        for (int i = 0; i < ctx->node_count; i++) {
+            int node_id = ctx->tour[i] + 1; // Map 0-indexed offset back to TSPLIB ID
+            printf(" %s (%d) -> ", CYRIAN_CITIES_40[node_id], node_id);
+            if ((i + 1) % 5 == 0) {
+                printf("\n");
+            }
         }
+        printf("\n");
     }
-    printf("\n");
 }
 
 void load_cities_from_file(GraphContext* ctx, const char* filepath) {
@@ -1180,15 +1182,13 @@ void run_lk_engine(GraphContext* ctx) {
         improvement_found = false;
         epoch++;
 
-        if (epoch % 10 == 0) {
-            current_cost = calculate_current_tour_cost(ctx);
-            double epoch_optimality_gap = ((current_cost - lower_bound) / lower_bound) * 100.0;
-            printf("    [LK Engine] Epoch %d, Scanning Node Layout. Cost: %.4lf | Current Optimality Gap: %.4lf%%\n",
-                    epoch, current_cost, epoch_optimality_gap);
-            double gap_from_actual_solution = ((current_cost - BEST_TOUR_SOLUTION) / BEST_TOUR_SOLUTION) * 100.0;
-            printf("    [LK Engine] Gap From The Actual Solution: %.4lf%%\n",
-                    gap_from_actual_solution);
-        }
+        current_cost = calculate_current_tour_cost(ctx);
+        double epoch_optimality_gap = ((current_cost - lower_bound) / lower_bound) * 100.0;
+        printf("    [LK Engine] Epoch %d, Scanning Node Layout. Cost: %.4lf | Current Optimality Gap: %.4lf%%\n",
+                epoch, current_cost, epoch_optimality_gap);
+        double gap_from_actual_solution = ((current_cost - BEST_TOUR_SOLUTION) / BEST_TOUR_SOLUTION) * 100.0;
+        printf("    [LK Engine] Gap From The Actual Solution: %.4lf%%\n",
+                gap_from_actual_solution);
 
         for (int n_idx = 0; n_idx < ctx->node_count; n_idx++) {
             // Set the base anchor t1 to the currentndoe in the tour layout.
@@ -1307,7 +1307,7 @@ int main()
 {
     GraphContext ctx = {};
 
-    load_cities_from_file(&ctx, "./syria40.tsp");
+    load_cities_from_file(&ctx, "./kroA100.tsp");
     compute_edges(&ctx);
 
     ctx.upper_bound = estimate_target_bound(&ctx);
