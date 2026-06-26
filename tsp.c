@@ -2,9 +2,8 @@
  * tsp.c - Custom TSP Solver using LKH algorithm, powered by
  * Lin-Kernighan heuristic search and Held-Karp relaxation.
  *
- * Corrected Static Preprocessing Pipeline.
+ * This Code is licnesed under the MIT licnese, see LICENSE.
  */
-
 
 #include <stdio.h>
 #include <float.h>
@@ -18,10 +17,8 @@
 #define KROA100_OPTIMAL 21282.0
 #define SY40_OPTIMAL 2414824 
 
-
 // Change for the corresponding input file.
 #define BEST_TOUR_SOLUTION KROA100_OPTIMAL
-
 
 const char* CYRIAN_CITIES_40[] = {
     "", // Padding index 0 (since TSPLIB IDs start at 1)
@@ -34,7 +31,6 @@ const char* CYRIAN_CITIES_40[] = {
     "An-Nabek", "Yabroud", "Shahba", "Salkhad", "Mayadin", 
     "Amuda", "Al-Malikiyah", "Al-Thawrah", "Tell Abyad", "Ras al-Ayn"
 };
-
 
 typedef struct {
     int id;
@@ -75,7 +71,6 @@ typedef struct {
     int* pos;
 } GraphContext;
 
-
 void allocate_candidate_matrix(GraphContext* ctx) {
     ctx->max_candidates = MAX_CANDIDATES;
     size_t total_elements = (size_t) ctx->node_count * (size_t) MAX_CANDIDATES;
@@ -102,6 +97,7 @@ void init_graph_ctx(GraphContext* ctx, int n) {
     ctx->upper_bound_tour = (int*) malloc(n * sizeof(int));
     ctx->tour = malloc(ctx->node_count * sizeof(int));
     ctx->pos = malloc(ctx->node_count * sizeof(int));
+    allocate_candidate_matrix(ctx);
 }
 
 void print_named_tour(GraphContext* ctx) {
@@ -300,7 +296,9 @@ double sum_penalized_values(GraphContext* ctx) {
 }
 
 // EXTRACT ORIGINAL MST (Static Geometry)
-void extract_original_mst(GraphContext* ctx, Edge* output_edges) {
+Edge* extract_raw_mst(GraphContext* ctx) {
+    Edge* raw_mst = malloc((ctx->node_count - 1) * sizeof(Edge));
+
     // Sort by pure geometric distance
     qsort(ctx->edges, ctx->edge_count, sizeof(Edge), compare_edges_original);
 
@@ -313,12 +311,14 @@ void extract_original_mst(GraphContext* ctx, Edge* output_edges) {
         int v = ctx->edges[i].to;
         
         if (union_cities(ds, u, v)) {
-            output_edges[edge_idx++] = ctx->edges[i];
+            raw_mst[edge_idx++] = ctx->edges[i];
             mst_edge_count++;
             if (mst_edge_count == ctx->node_count - 1) break;
         }
     }
     disjointset_free(ds);
+
+    return raw_mst;
 }
 
 void extract_1_tree_weights(GraphContext* ctx, int spacial_node) {
@@ -370,13 +370,13 @@ double calculate_step_size(GraphContext* ctx) {
     return ctx->epsilon * (numerator) / denominator;
 }
 
-double estimate_target_bound(GraphContext* ctx) {
+void estimate_upper_bound(GraphContext* ctx) {
     int n = ctx->node_count;
     bool* visited = (bool*) calloc(n, sizeof(bool));
+
     int current_node = 0;
     visited[current_node] = true;
     ctx->upper_bound_tour[0] = current_node;
-    double total_ub_cost = 0.0;
 
     for (int step = 1; step < n; step++) {
         int next_node = -1;
@@ -390,16 +390,15 @@ double estimate_target_bound(GraphContext* ctx) {
                 }
             }
         }
-        total_ub_cost += min_dist;
+        ctx->upper_bound += min_dist;
         visited[next_node] = true;
         ctx->upper_bound_tour[step] = next_node;
         current_node = next_node;
     }
 
-    total_ub_cost += calculate_euclidean_distance(ctx, current_node, ctx->upper_bound_tour[0]);
+    ctx->upper_bound += calculate_euclidean_distance(ctx, current_node, ctx->upper_bound_tour[0]);
     free(visited);
-    printf("[Init] Initial Upper Bound: %lf\n", total_ub_cost);
-    return total_ub_cost;
+    printf("[Init] Initial Upper Bound: %lf\n", ctx->upper_bound);
 }
 
 typedef enum {
@@ -486,9 +485,8 @@ void add_tree_edge(TreeGraph* g, int u, int v, double cost) {
     g->head[u] = e;
 }
 
-
 // Static Geometric BFS
-void bfs_max_edges_static(TreeGraph* g, int root, int n, double* c_max, bool* visited) {
+void bfs_max_edges(TreeGraph* g, int root, int n, double* c_max, bool* visited) {
     int* queue = malloc(n * sizeof(int));
     int head = 0, tail = 0;
     visited[root] = true;
@@ -512,12 +510,10 @@ void bfs_max_edges_static(TreeGraph* g, int root, int n, double* c_max, bool* vi
     free(queue);
 }
 
-
 typedef struct {
     int node_id;
     double alpha;
 } AlphaPair;
-
 
 int compare_alphas(const void *a, const void *b) {
     double alpha_a = ((AlphaPair*)a)->alpha;
@@ -525,9 +521,8 @@ int compare_alphas(const void *a, const void *b) {
     return (alpha_a > alpha_b) - (alpha_a < alpha_b);
 }
 
-
 // COMPUTED ON STATIC DISTANCES
-void compute_all_candidate_sets_static(GraphContext* ctx, TreeGraph *g) {
+void compute_all_candidate_sets(GraphContext* ctx, TreeGraph *g) {
     int node_count = ctx->node_count;
     int max_candidates = ctx->max_candidates;
     double* c_max = malloc(node_count * sizeof(double));
@@ -540,7 +535,7 @@ void compute_all_candidate_sets_static(GraphContext* ctx, TreeGraph *g) {
             c_max[j] = 0.0;
         }
 
-        bfs_max_edges_static(g, i, node_count, c_max, visited);
+        bfs_max_edges(g, i, node_count, c_max, visited);
 
         for (int j = 0; j < node_count; j++) {
             pairs[j].node_id = j;
@@ -565,50 +560,56 @@ void compute_all_candidate_sets_static(GraphContext* ctx, TreeGraph *g) {
         }
     }
 
-
     free(c_max);
     free(pairs);
 }
 
-
-void generate_alpha_candidates_static(GraphContext* ctx, Edge* mst_edges) {
-    int n = ctx->node_count;
+TreeGraph init_tree_graph(int n) {
     TreeGraph g;
+
     g.edge_count = 0;
     g.edges = malloc(2 * n * sizeof(TreeEdge));
-    g.next = malloc(2 * n * sizeof(int));
-    g.head = malloc(n * sizeof(int));
+    g.next  = malloc(2 * n * sizeof(int));
+    g.head  = malloc(n * sizeof(int));
     
     for (int i = 0; i < n; i++) g.head[i] = -1;
 
+    return g;
+}
+
+void generate_alpha_candidate_sets(GraphContext* ctx) {
+    // Extract MST on RAW distances, no penalties
+    Edge* raw_mst = extract_raw_mst(ctx);
+
+    int n = ctx->node_count;
+
+    TreeGraph g = init_tree_graph(n);
 
     // Use only N-1 edges of the MST
     for (int i = 0; i < n - 1; i++) {
-        int u = mst_edges[i].from;
-        int v = mst_edges[i].to;
-        double weight = mst_edges[i].distance; // GEOMETRIC
+        int u = raw_mst[i].from;
+        int v = raw_mst[i].to;
+        double weight = raw_mst[i].distance; // GEOMETRIC
         
         add_tree_edge(&g, u, v, weight);
         add_tree_edge(&g, v, u, weight);
     }
 
-    compute_all_candidate_sets_static(ctx, &g);
+    compute_all_candidate_sets(ctx, &g);
 
     free(g.edges);
     free(g.next);
     free(g.head);
+    free(raw_mst);
 }
 
-
 #define MAX_LK_DEPTH 10
-
 
 typedef struct {
     int t[2 * MAX_LK_DEPTH + 1];
     int current_depth;
     bool* edge_status_changed;
 } LKContext;
-
 
 bool is_edge_disjoint(LKContext* lkctx, int u, int v, int current_k) {
     for (int i = 1; i < current_k; i++) {
@@ -622,32 +623,33 @@ bool is_edge_disjoint(LKContext* lkctx, int u, int v, int current_k) {
     return true;
 }
 
-
 typedef struct {
     int k_idx;
     int direction;
     double saved_gain;
 } LKLoopState;
 
-
 int get_tour_successor(GraphContext* ctx, int node) {
     return ctx->tour[(ctx->pos[node] + 1) % ctx->node_count];
 }
-
 
 int get_tour_predecessor(GraphContext* ctx, int node) {
     return ctx->tour[(ctx->pos[node] - 1 + ctx->node_count) % ctx->node_count];
 }
 
+typedef struct { 
+    int to_local;
+    bool is_added; 
+} VirtualEdge;
 
-typedef struct { int to_local; bool is_added; } VirtualEdge;
-typedef struct { int node; int pos; } SortNode;
-
+typedef struct {
+    int node;
+    int pos; 
+} SortNode;
 
 int compare_sort_nodes(const void *a, const void *b) {
     return ((SortNode*)a)->pos - ((SortNode*)b)->pos;
 }
-
 
 bool is_broken_edge(LKContext *lkctx, int k_depth, int u, int v) {
     for (int i = 1; i <= k_depth; i++) {
@@ -657,7 +659,6 @@ bool is_broken_edge(LKContext *lkctx, int k_depth, int u, int v) {
     return false;
 }
 
-
 int get_local_idx(SortNode *nodes, int num_nodes, int node_id) {
     for (int i = 0; i < num_nodes; i++) {
         if (nodes[i].node == node_id) return i;
@@ -665,30 +666,26 @@ int get_local_idx(SortNode *nodes, int num_nodes, int node_id) {
     return -1;
 }
 
-
 bool validate_tour_feasibility(GraphContext *ctx, LKContext *ws, int t_2k) {
     int k_depth = ws->current_depth;
     int num_nodes = 2 * k_depth;
     ws->t[2 * k_depth] = t_2k; 
-
 
     SortNode nodes[20];
     for (int i = 1; i <= num_nodes; i++) {
         nodes[i-1].node = ws->t[i];
         nodes[i-1].pos = ctx->pos[ws->t[i]];
     }
-    qsort(nodes, num_nodes, sizeof(SortNode), compare_sort_nodes);
 
+    qsort(nodes, num_nodes, sizeof(SortNode), compare_sort_nodes);
 
     VirtualEdge v_graph[20][2];
     int v_count[20] = {0};
-
 
     int l_t1 = get_local_idx(nodes, num_nodes, ws->t[1]);
     int l_t2k = get_local_idx(nodes, num_nodes, ws->t[num_nodes]);
     v_graph[l_t1][v_count[l_t1]++] = (VirtualEdge){l_t2k, true};
     v_graph[l_t2k][v_count[l_t2k]++] = (VirtualEdge){l_t1, true};
-
 
     for (int i = 1; i < k_depth; i++) {
         int l_t2i = get_local_idx(nodes, num_nodes, ws->t[2*i]);
@@ -696,7 +693,6 @@ bool validate_tour_feasibility(GraphContext *ctx, LKContext *ws, int t_2k) {
         v_graph[l_t2i][v_count[l_t2i]++] = (VirtualEdge){l_t2i_p1, true};
         v_graph[l_t2i_p1][v_count[l_t2i_p1]++] = (VirtualEdge){l_t2i, true};
     }
-
 
     for (int i = 0; i < num_nodes; i++) {
         int u = nodes[i].node;
@@ -707,7 +703,6 @@ bool validate_tour_feasibility(GraphContext *ctx, LKContext *ws, int t_2k) {
             v_graph[next_local][v_count[next_local]++] = (VirtualEdge){i, false};
         }
     }
-
 
     bool visited_local[20] = {false};
     int curr_local = 0, prev_local = -1, count_visited = 0;
@@ -721,10 +716,8 @@ bool validate_tour_feasibility(GraphContext *ctx, LKContext *ws, int t_2k) {
         curr_local = next_local;
     } while (curr_local != 0 && !visited_local[curr_local]);
 
-
     return (count_visited == num_nodes && curr_local == 0);
 }
-
 
 void execute_variable_lk_swap(GraphContext* ctx, LKContext* lkctx) {
     int k_depth = lkctx->current_depth;
@@ -734,18 +727,16 @@ void execute_variable_lk_swap(GraphContext* ctx, LKContext* lkctx) {
         nodes[i-1].node = lkctx->t[i];
         nodes[i-1].pos = ctx->pos[lkctx->t[i]];
     }
-    qsort(nodes, num_nodes, sizeof(SortNode), compare_sort_nodes);
 
+    qsort(nodes, num_nodes, sizeof(SortNode), compare_sort_nodes);
 
     VirtualEdge v_graph[20][2];
     int v_count[20] = {0};
-
 
     int l_t1 = get_local_idx(nodes, num_nodes, lkctx->t[1]);
     int l_t2k = get_local_idx(nodes, num_nodes, lkctx->t[num_nodes]);
     v_graph[l_t1][v_count[l_t1]++] = (VirtualEdge){l_t2k, true};
     v_graph[l_t2k][v_count[l_t2k]++] = (VirtualEdge){l_t1, true};
-
 
     for (int i = 1; i < k_depth; i++) {
         int l_t2i = get_local_idx(nodes, num_nodes, lkctx->t[2*i]);
@@ -753,7 +744,6 @@ void execute_variable_lk_swap(GraphContext* ctx, LKContext* lkctx) {
         v_graph[l_t2i][v_count[l_t2i]++] = (VirtualEdge){l_t2i_p1, true};
         v_graph[l_t2i_p1][v_count[l_t2i_p1]++] = (VirtualEdge){l_t2i, true};
     }
-
 
     for (int i = 0; i < num_nodes; i++) {
         int u = nodes[i].node;
@@ -765,22 +755,18 @@ void execute_variable_lk_swap(GraphContext* ctx, LKContext* lkctx) {
         }
     }
 
-
     int *new_tour = malloc(ctx->node_count * sizeof(int));
     int filled = 0;
     int curr_local = l_t1;
     int curr_node = lkctx->t[1];
     int prev_local = -1;
 
-
     new_tour[filled++] = curr_node;
-
 
     while (filled < ctx->node_count) {
         int edge_idx = (v_graph[curr_local][0].to_local == prev_local) ? 1 : 0;
         VirtualEdge edge = v_graph[curr_local][edge_idx];
         int next_local = edge.to_local;
-
 
         if (edge.is_added) {
             curr_node = nodes[next_local].node;
@@ -810,14 +796,13 @@ void execute_variable_lk_swap(GraphContext* ctx, LKContext* lkctx) {
         curr_local = next_local;
     }
 
-
     for (int i = 0; i < ctx->node_count; i++) {
         ctx->tour[i] = new_tour[i];
         ctx->pos[new_tour[i]] = i;
     }
+
     free(new_tour);
 }
-
 
 double calculate_current_tour_cost(GraphContext* ctx) {
     double total = 0.0;
@@ -827,7 +812,6 @@ double calculate_current_tour_cost(GraphContext* ctx) {
     return total;
 }
 
-
 bool lk_search_step(GraphContext* ctx, LKContext* lkctx) {
     LKLoopState loop_stack[MAX_LK_DEPTH];
     int depth = 1;
@@ -835,42 +819,32 @@ bool lk_search_step(GraphContext* ctx, LKContext* lkctx) {
     loop_stack[depth].direction = 0;
     loop_stack[depth].saved_gain = 0;
 
-
     while (depth > 0) {
         int t_2i = lkctx->t[2 * depth];
         double cumulative_gain = loop_stack[depth].saved_gain;
         bool step_deepened = false;
 
-
         for (; loop_stack[depth].k_idx < ctx->max_candidates; loop_stack[depth].k_idx++) {
             int t_2i_plus_1 = GET_CANDIDATE(ctx, t_2i, loop_stack[depth].k_idx);
 
-
             if (t_2i_plus_1 == lkctx->t[2 * depth - 1] || !is_edge_disjoint(lkctx, t_2i, t_2i_plus_1, depth)) continue;
-
 
             double added_cost = calculate_euclidean_distance(ctx, t_2i, t_2i_plus_1);
             double break_cost = calculate_euclidean_distance(ctx, lkctx->t[2 * depth - 1], t_2i);
             double step_gain = break_cost - added_cost;
 
-
             if (cumulative_gain + step_gain <= 1e-6) continue;
 
-
             lkctx->t[2 * depth + 1] = t_2i_plus_1;
-
 
             for (; loop_stack[depth].direction < 2; loop_stack[depth].direction++) {
                 int t_2i_plus_2 = (loop_stack[depth].direction == 0)
                     ? get_tour_successor(ctx, t_2i_plus_1) : get_tour_predecessor(ctx, t_2i_plus_1);
 
-
                 if (!is_edge_disjoint(lkctx, t_2i_plus_1, t_2i_plus_2, depth)) continue;
-
 
                 double closure_gain = calculate_euclidean_distance(ctx, t_2i_plus_1, t_2i_plus_2) -
                                       calculate_euclidean_distance(ctx, t_2i_plus_2, lkctx->t[1]);
-
 
                 if (cumulative_gain + step_gain + closure_gain > 1e-6) {
                     lkctx->current_depth = depth + 1;
@@ -880,7 +854,6 @@ bool lk_search_step(GraphContext* ctx, LKContext* lkctx) {
                         return true;
                     }
                 }
-
 
                 if (depth + 1 < MAX_LK_DEPTH) {
                     lkctx->t[2 * depth + 2] = t_2i_plus_2;
@@ -897,7 +870,6 @@ bool lk_search_step(GraphContext* ctx, LKContext* lkctx) {
             if (step_deepened) break;
             loop_stack[depth].direction = 0;
         }
-
 
         if (step_deepened) continue;
         
@@ -1011,26 +983,20 @@ int main()
 {
     GraphContext ctx = {};
 
-    // 1. Load Data & Edges
+    // Load Data & Edges
     load_cities_from_file(&ctx, "./kroA100.tsp");
     compute_edges(&ctx);
-    ctx.upper_bound = estimate_target_bound(&ctx);
 
-    // 2. STATIC PREPROCESSING PIPELINE (THE FIX)
-    allocate_candidate_matrix(&ctx);
-    Edge* original_mst = malloc((ctx.node_count - 1) * sizeof(Edge));
-    
-    // Extract MST on RAW distances, no penalties
-    extract_original_mst(&ctx, original_mst);
+    // Caculate estimated upper bound.
+    estimate_upper_bound(&ctx);
     
     // Generate candidates based on TRUE MST
-    generate_alpha_candidates_static(&ctx, original_mst);
-    free(original_mst);
+    generate_alpha_candidate_sets(&ctx);
 
-    // 3. OPTIMIZATION
+    // Held-Karp Optimaization.
     optimaize_held_karp_relaxation(&ctx);
 
-    // 4. TOUR CONSTRUCTION & IMPROVEMENT
+    // Initial Tour Construction & LK Local Search Improvement.
     generate_nearest_neighbor_tour(&ctx, 0);
     run_lk_engine(&ctx);
 
