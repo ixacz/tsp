@@ -53,24 +53,30 @@ typedef struct {
 typedef struct {
     Node* nodes;
     int node_count;
-    // Current Lagrange-Multiplier value; node penalty (pi).
-    double* pis;
-    double* best_pis;
-    // Degree of the node in te current 1-Tree.
-    int* degrees;
 
     Edge* edges;
     int edge_count;
+
+    // Current Lagrange-Multiplier value; node penalty (pi).
+    double* pis;
+    double* best_pis;
+
+    // Degree of the node in te current 1-Tree.
+    int* degrees;
     
+    // 1-Tree values
+    int* curr_1_tree_edges;
+    int* best_1_tree_edges;
+    double curr_lower_bound;
+    double best_lower_bound;
+
     int max_candidates;
     int* candidates;
     
     int* upper_bound_tour;
-    double upper_bound;
-    double epsilon;
+    double upper_bound_value;
 
-    double curr_lower_bound;
-    double best_lower_bound;
+    double epsilon;
 
     int* tour;
     int* pos;
@@ -100,6 +106,8 @@ void init_graph_ctx(GraphContext* ctx, int n) {
     ctx->pis = (double*) calloc(n, sizeof(double));
     ctx->best_pis = (double*) calloc(n, sizeof(double));
     ctx->degrees = (int*) malloc(n * sizeof(double));
+    ctx->curr_1_tree_edges = (int*) malloc(ctx->node_count * sizeof(int));
+    ctx->best_1_tree_edges = (int*) malloc(ctx->node_count * sizeof(int));
     ctx->upper_bound_tour = (int*) malloc(n * sizeof(int));
     allocate_candidate_matrix(ctx);
     ctx->tour = malloc(ctx->node_count * sizeof(int));
@@ -188,6 +196,17 @@ void load_cities_from_file(GraphContext* ctx, const char* filepath) {
 }
 
 
+#define __NODE_X(ctx, i) ((ctx)->nodes[(i)].x)
+#define __DDX(ctx, from, to) (__NODE_X(ctx, from) - __NODE_X(ctx, to))
+#define __DDX_SQUARED(ctx, from, to) (__DDX(ctx, from, to) * __DDX(ctx, from, to))
+
+#define __NODE_Y(ctx, i) ((ctx)->nodes[(i)].y)
+#define __DDY(ctx, from, to) (__NODE_Y(ctx, from) - __NODE_Y(ctx, to))
+#define __DDY_SQUARED(ctx, from, to) (__DDY(ctx, from, to) * __DDY(ctx, from, to))
+#define CALCULATE_DISTANCE(ctx, from, to) \
+    ((int) (sqrt(__DDX_SQUARED(ctx, from, to) + __DDY_SQUARED(ctx, from, to)) + 0.5))
+
+
 int calculate_euclidean_distance(GraphContext* ctx, int from, int to) {
     long long dx = ctx->nodes[from].x - ctx->nodes[to].x;
     long long dy = ctx->nodes[from].y - ctx->nodes[to].y;
@@ -199,22 +218,18 @@ int calculate_euclidean_distance(GraphContext* ctx, int from, int to) {
 }
 
 void compute_edges(GraphContext* ctx) {
-    if (ctx->edges == NULL && ctx->nodes != NULL) {
-        ctx->edge_count = ctx->node_count * (ctx->node_count - 1) / 2;
-        ctx->edges = malloc(ctx->edge_count * sizeof(Edge));
-    }
     int edge_idx = 0;
 
     for (int i = 0; i < ctx->node_count; i++) {
-        Node* cn = &ctx->nodes[i];
+        int fromid = ctx->nodes[i].id;
 
         for (int j = 0; j < ctx->node_count; j++) {
             if (j > i) {
-                Node* tn = &ctx->nodes[j];
-                int dist = calculate_euclidean_distance(ctx, cn->id, tn->id);
+                int toid = ctx->nodes[j].id;
+                int dist = CALCULATE_DISTANCE(ctx, fromid, toid);
 
-                ctx->edges[edge_idx].from = cn->id;
-                ctx->edges[edge_idx].to = tn->id;
+                ctx->edges[edge_idx].from = fromid;
+                ctx->edges[edge_idx].to = toid;
                 ctx->edges[edge_idx].distance = dist;
                 ctx->edges[edge_idx].penalized_cost = dist;
                 edge_idx++;
@@ -322,7 +337,7 @@ bool union_cities(DisjointSet ds, int city_a, int city_b) {
     return false;
 }
 
-double sum_penalized_values(GraphContext* ctx) {
+double _sum_penalized_values(GraphContext* ctx) {
     double total_penalized_values = 0.0;
 
     for (int i = 0; i < ctx->node_count; i++) {
@@ -332,12 +347,20 @@ double sum_penalized_values(GraphContext* ctx) {
     return total_penalized_values;
 }
 
-void extract_1_tree_weights(GraphContext* ctx, int spacial_node) {
+void extract_1_tree(GraphContext* ctx) {
+    int spacial_node = 0;
     double one_tree_penalized_weight = 0.0;
-    int mst_edge_count = 0;
     DisjointSet ds = disjointset_create(ctx->node_count);
+    int mst_edge_count = 2;
     int spacial_node_connected_count = 0;
 
+    // Update penalized_cost for all edges: new penalized_cost = geometric distance + pi_i + pi_j.
+    apply_edges_penalized_cost(ctx);
+
+    // Sort edges in ascending order.
+    qsort_edges(ctx);
+
+    // Restore degrees to zero.
     for (int i = 0; i < ctx->node_count; i++) {
         ctx->degrees[i] = 0;
     }
@@ -345,32 +368,36 @@ void extract_1_tree_weights(GraphContext* ctx, int spacial_node) {
     for (int i = 0; i < ctx->edge_count; i++) {
         int fromid = ctx->edges[i].from;
         int toid = ctx->edges[i].to;
-
+        
+        // Find 1-Tree Connections
         if (fromid == spacial_node || toid == spacial_node) {
             if (spacial_node_connected_count < 2) {
                 one_tree_penalized_weight += ctx->edges[i].penalized_cost;
                 ctx->degrees[fromid]++;
                 ctx->degrees[toid]++;
+                ctx->curr_1_tree_edges[spacial_node_connected_count] = i;
                 spacial_node_connected_count++;
             }
             continue;
         } 
 
+        // Find MST Connections
         if (union_cities(ds, fromid, toid)) {
             one_tree_penalized_weight += ctx->edges[i].penalized_cost;
             ctx->degrees[fromid]++;
             ctx->degrees[toid]++;
+            ctx->curr_1_tree_edges[mst_edge_count] = i;
             mst_edge_count++;
 
             // break once we reach our target edges.
-            if (mst_edge_count == ctx->node_count - 2 && spacial_node_connected_count == 2) break;
+            if (mst_edge_count == ctx->node_count && spacial_node_connected_count == 2) break;
         }
     }
 
     disjointset_free(ds);
 
     // Compute the standard Held-Karp lower bound adjustment: L(pi) = W(T_pi) - 2 * sum(pi_i).
-    ctx->curr_lower_bound = one_tree_penalized_weight - 2 * sum_penalized_values(ctx);
+    ctx->curr_lower_bound = one_tree_penalized_weight - 2 * _sum_penalized_values(ctx);
 }
 
 double calculate_step_size(GraphContext* ctx) {
@@ -390,13 +417,13 @@ double calculate_step_size(GraphContext* ctx) {
     }
 
     // Dynaimc Step Size Formula: Epsilon * (Upper Bound - Current Lower Bound) / Denominator.
-    double numerator = ctx->upper_bound - ctx->curr_lower_bound;
+    double numerator = ctx->upper_bound_value - ctx->curr_lower_bound;
     // printf("Current Numerator = %lf\n", numerator);
     double step_size = ctx->epsilon * (numerator) / denominator;
     return step_size;
 }
 
-double estimate_target_bound(GraphContext* ctx) {
+void estimate_target_bound(GraphContext* ctx) {
     int n = ctx->node_count;
     bool* visited = (bool*) calloc(n, sizeof(bool));
 
@@ -404,15 +431,13 @@ double estimate_target_bound(GraphContext* ctx) {
     visited[current_node] = true;
     ctx->upper_bound_tour[0] = current_node;
 
-    double total_ub_cost = 0.0;
-
     for (int step = 1; step < n; step++) {
         int next_node = -1;
         double min_dist = DBL_MAX;
 
         for (int i = 0; i < n; i++) {
             if (!visited[i]) {
-                double dist = calculate_euclidean_distance(ctx, current_node, i);
+                double dist = CALCULATE_DISTANCE(ctx, current_node, i);
                 if (dist < min_dist) {
                     min_dist = dist;
                     next_node = i;
@@ -420,22 +445,19 @@ double estimate_target_bound(GraphContext* ctx) {
             }
         }
 
-        total_ub_cost += min_dist;
+        ctx->upper_bound_value += min_dist;
         visited[next_node] = true;
         ctx->upper_bound_tour[step] = next_node;
         current_node = next_node;
     }
 
-    total_ub_cost += calculate_euclidean_distance(ctx, current_node, ctx->upper_bound_tour[0]);
+    ctx->upper_bound_value += CALCULATE_DISTANCE(ctx, current_node, ctx->upper_bound_tour[0]);
     free(visited);
 
-    printf("[Init] Naive Nearest Neighbor Search tour cost (Initial Upper Bound): %lf\n", total_ub_cost);
-    return total_ub_cost;
+    printf("[Init] Naive Nearest Neighbor Search tour cost (Initial Upper Bound): %lf\n", ctx->upper_bound_value);
 }
 
-
-
-// // Valid tsp tour all it cities has exactly 2 edges.
+// Valid tsp tour all it cities has exactly 2 edges.
 bool is_valid_tsp_tour(GraphContext* ctx) {
     bool is_true_tour = true;
 
@@ -457,17 +479,23 @@ typedef enum {
 
 #define MIN_EPSILON 1e-4
 
-// typedef struct {
-//     Edges one_tree;
-//     double best_lower_bound;
-// } HeldKarpOneTree;
-
 void save_best_pi_values(GraphContext* ctx) {
     memcpy(ctx->best_pis, ctx->pis, ctx->node_count * sizeof(double));
 }
 
+void save_best_1_tree_edges(GraphContext* ctx) {
+    memcpy(ctx->best_1_tree_edges, ctx->curr_1_tree_edges, ctx->node_count * sizeof(int));
+}
+
+void update_nodes_pi_value(GraphContext* ctx, double step_size) {
+    for (int i = 0; i < ctx->node_count; i++) {
+        int nodeid = ctx->nodes[i].id;
+        double gradient = ctx->degrees[nodeid] - 2;
+        ctx->pis[nodeid] += step_size * gradient;
+    }
+}
+
 HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
-    int spacial_node = 0;
     ctx->epsilon = 2.0;
 
     // Determine LKH dynamic initial period scaling.
@@ -489,20 +517,20 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
 
         // The inner loop.
         for (int step = 1; step <= period; step++) {
-            // Update penalized_cost for all edges: new penalized_cost = geometric distance + pi_i + pi_j.
-            apply_edges_penalized_cost(ctx);
-            // Sort edges in ascending order.
-            qsort_edges(ctx);
 
-            extract_1_tree_weights(ctx, spacial_node);
+            // Extract 1 Tree.
+            extract_1_tree(ctx);
             
             // Evaluate if we found a new higher upper bound.
             if (ctx->curr_lower_bound > ctx->best_lower_bound) {
                 printf("    [Lower Bound Improvement Found] Period Step %d: Old Best LB = %lf -> New Best LB = %lf (Diff: %+lf)\n",
                         step, ctx->best_lower_bound, ctx->curr_lower_bound, ctx->curr_lower_bound - ctx->best_lower_bound);
-
+                
+                // Save Best parameters found so far.
                 ctx->best_lower_bound = ctx->curr_lower_bound;
                 save_best_pi_values(ctx);
+                save_best_1_tree_edges(ctx);
+
                 improvement_found = true;
             }
 
@@ -510,16 +538,17 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
             if (step_size == 0.0) {
                 printf("    [Step Size] Convergence Achieved! Natural valid tour discovered during subgradient walk.\n");
                 status = HK_NATURAL_TOUR_FOUND;
+
+                // Save Best parameters found so far.
+                ctx->best_lower_bound = ctx->curr_lower_bound;
                 save_best_pi_values(ctx);
+                save_best_1_tree_edges(ctx);
+
                 goto exit;
             }
 
             // Update transient pi penalties using the subgradient (G_i = d_i - 2).
-            for (int i = 0; i < ctx->node_count; i++) {
-                int nodeid = ctx->nodes[i].id;
-                double gradient = ctx->degrees[nodeid] - 2;
-                ctx->pis[nodeid] += step_size * gradient;
-            }
+            update_nodes_pi_value(ctx, step_size);
         }
 
         // LKH Monemtum rule: if we improved late in this phase, rise the monemtum
@@ -533,103 +562,6 @@ HKStatus optimaize_held_karp_relaxation(GraphContext* ctx) {
 
 exit:
     return status;
-}
-
-// Reconstructs the 1-tree and returns the total penalized lower bound cost
-double reconstruct_optimal_1tree(GraphContext* ctx, Edge *output_edges) {
-    int n = ctx->node_count;
-    int edge_idx = 0;
-    double total_1tree_cost = 0.0;
-
-    // Workspace arrays for Prim's Algorithm (O(N) space)
-    double* min_dist = malloc(n * sizeof(double));
-    int* parent = malloc(n * sizeof(int));
-    bool* in_mst = calloc(n, sizeof(bool));
-
-    // Initialize Prim's workspace starting from node 1 (skipping node 0)
-    for (int i = 1; i < n; i++) {
-        min_dist[i] = DBL_MAX;
-        parent[i] = -1;
-    }
-    min_dist[1] = 0.0; // Start building MST from node 1
-
-    // --- STEP 1: Prim's Algorithm on Nodes 1 to N-1 ---
-    for (int step = 1; step < n; step++) {
-        // Find the unvisited node with the minimum penalized distance
-        int u = -1;
-        double min_val = DBL_MAX;
-        for (int i = 1; i < n; i++) {
-            if (!in_mst[i] && min_dist[i] < min_val) {
-                min_val = min_dist[i];
-                u = i;
-            }
-        }
-
-        in_mst[u] = true;
-        total_1tree_cost += min_val;
-
-        // If it's not the starting node, record the MST edge
-        if (parent[u] != -1) {
-            output_edges[edge_idx].from = parent[u];
-            output_edges[edge_idx].to = u;
-            output_edges[edge_idx].penalized_cost = min_val;
-            edge_idx++;
-        }
-
-        // Update neighbors' configurations
-        for (int v = 1; v < n; v++) {
-            if (!in_mst[v]) {
-                // Penalized distance calculation: c_uv + pi[u] + pi[v]
-                double p_dist = calculate_euclidean_distance(ctx, u, v) + ctx->best_pis[u] + ctx->best_pis[v];
-                if (p_dist < min_dist[v]) {
-                    min_dist[v] = p_dist;
-                    parent[v] = u;
-                }
-            }
-        }
-    }
-
-    // --- STEP 2: Find the 2 Cheapest Penalized Edges from Node 0 ---
-    int best_v1 = -1, best_v2 = -1;
-    double min_e1 = DBL_MAX, min_e2 = DBL_MAX;
-
-    for (int v = 1; v < n; v++) {
-        double p_dist = calculate_euclidean_distance(ctx, 0, v) + ctx->best_pis[0] + ctx->best_pis[v];
-        
-        if (p_dist < min_e1) {
-            min_e2 = min_e1;
-            best_v2 = best_v1;
-            
-            min_e1 = p_dist;
-            best_v1 = v;
-        } else if (p_dist < min_e2) {
-            min_e2 = p_dist;
-            best_v2 = v;
-        }
-    }
-
-    // Add node 0's two chosen edges to the output structure
-    output_edges[edge_idx].from = 0;
-    output_edges[edge_idx].to = best_v1;
-    output_edges[edge_idx].penalized_cost = min_e1;
-    edge_idx++;
-
-    output_edges[edge_idx].from = 0;
-    output_edges[edge_idx].to = best_v2;
-    output_edges[edge_idx].penalized_cost = min_e2;
-    edge_idx++;
-
-    total_1tree_cost += (min_e1 + min_e2);
-
-    // Clean up temporary workspace
-    free(min_dist);
-    free(parent);
-    free(in_mst);
-
-    printf("[1-Tree] Reconstruction complete using locked Pi multipliers. Penalized Cost: %lf\n",
-            total_1tree_cost);
-
-    return total_1tree_cost;
 }
 
 typedef struct {
@@ -767,10 +699,10 @@ void compute_all_candidate_sets(GraphContext* ctx, TreeGraph *g) {
                 pairs[j].alpha = DBL_MAX; // Can't connect a node to itself
             } else {
                 // penalized_distance = original_rounded_dist + pi[i] + pi[j]
-                double p_dist = calculate_euclidean_distance(ctx, i, j) + ctx->pis[i] + ctx->pis[j];
+                double penalized_cost = calculate_euclidean_distance(ctx, i, j) + ctx->pis[i] + ctx->pis[j];
                 
                 // alpha = penalized_distance - max_edge_on_path
-                double alpha_val = p_dist - c_max[j];
+                double alpha_val = penalized_cost - c_max[j];
                 
                 // Clean up tiny floating point precision noise (e.g. -0.0000001 -> 0.0)
                 pairs[j].alpha = (alpha_val < 1e-6) ? 0.0 : alpha_val;
@@ -786,7 +718,7 @@ void compute_all_candidate_sets(GraphContext* ctx, TreeGraph *g) {
         }
 
         if ((i + 1) % 10 == 0 || (i + 1) == node_count) {
-            printf("[Candidates Generation] Computed alpha-sets for %d / %d nodes.\n", 
+            printf("[Candidates Generation] Computed alpha-nearness for %d / %d nodes.\n", 
                     i + 1, node_count);
         }
     }
@@ -796,7 +728,7 @@ void compute_all_candidate_sets(GraphContext* ctx, TreeGraph *g) {
     free(pairs);
 }
 
-void generate_alpha_candidates(GraphContext* ctx, Edge* reconstructed_edges) {
+void generate_alpha_candidates(GraphContext* ctx) {
     int n = ctx->node_count;
 
     TreeGraph g;
@@ -811,13 +743,15 @@ void generate_alpha_candidates(GraphContext* ctx, Edge* reconstructed_edges) {
     }
 
     for (int i = 0; i < n; i++) {
-        int u = reconstructed_edges[i].from;
-        int v = reconstructed_edges[i].to;
-        double weight = reconstructed_edges[i].penalized_cost;
+        int edge_idx = ctx->best_1_tree_edges[i];
+
+        int u = ctx->edges[edge_idx].from;
+        int v = ctx->edges[edge_idx].to;
+        double penalized_cost = ctx->edges[edge_idx].penalized_cost;
         
         // Add bidirectional edges to the tree structure.
-        add_tree_edge(&g, u, v, weight);
-        add_tree_edge(&g, v, u, weight);
+        add_tree_edge(&g, u, v, penalized_cost);
+        add_tree_edge(&g, v, u, penalized_cost);
     }
 
     compute_all_candidate_sets(ctx, &g);
@@ -1310,18 +1244,14 @@ int main()
     load_cities_from_file(&ctx, "./kroA100.tsp");
     compute_edges(&ctx);
 
-    ctx.upper_bound = estimate_target_bound(&ctx);
+    extract_1_tree(&ctx);
 
-    optimaize_held_karp_relaxation(&ctx);
-
-    allocate_candidate_matrix(&ctx);
+    estimate_target_bound(&ctx);
     
-    Edge* optimal_1_tree = malloc(ctx.node_count * sizeof(Edge));
+    optimaize_held_karp_relaxation(&ctx);
+    printf("Best Lower Bound = %lf\n", ctx.best_lower_bound);
 
-    double penalized_lower_bound = reconstruct_optimal_1tree(&ctx, optimal_1_tree);
-    (void) penalized_lower_bound;
-
-    generate_alpha_candidates(&ctx, optimal_1_tree);
+    generate_alpha_candidates(&ctx);
 
     generate_nearest_neighbor_tour(&ctx, 0);
 
